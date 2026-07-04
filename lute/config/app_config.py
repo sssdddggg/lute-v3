@@ -38,6 +38,10 @@ class AppConfig:  # pylint: disable=too-many-instance-attributes
 
         self.is_docker = bool(config.get("IS_DOCKER", False))
 
+        # Enable OCR fallback for scanned PDFs (no text layer).
+        # Only takes effect if the 'ocr' extra and Tesseract are installed.
+        self.ocr_enabled = bool(config.get("OCR_ENABLED", True))
+
         # Database name.
         self.dbname = config.get("DBNAME", None)
         if self.dbname is None:

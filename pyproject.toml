@@ -45,6 +45,9 @@ lute = "lute.main:start"
 lute.config = ["config/config.yml"]
 
 [project.optional-dependencies]
+ocr = [
+  "ocrmypdf>=15,<17",
+]
 dev = [
   "coverage>=7.3.1,<8",
   "invoke>=2.2.0,<3",

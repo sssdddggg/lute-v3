@@ -16,6 +16,8 @@ from openepub import Epub, EpubError
 from pypdf import PdfReader
 from subtitle_parser import SrtParser, WebVttParser
 from lute.book.model import Repository
+from lute.book import ocr
+from lute.models.repositories import LanguageRepository
 
 
 class BookImportException(Exception):
@@ -40,9 +42,12 @@ class BookDataFromUrl:
 class FileTextExtraction:
     "Utility to extract text from various file formats."
 
-    def get_file_content(self, filename, filestream):
+    def get_file_content(self, filename, filestream, language_name=None):
         """
         Get the content of the file.
+
+        language_name is used for the OCR fallback on scanned PDFs, to
+        select the Tesseract language; it is ignored for other formats.
         """
         _, ext = os.path.splitext(filename)
         ext = (ext or "").lower()
@@ -60,7 +65,7 @@ class FileTextExtraction:
         handlers = {
             ".txt": self._get_textfile_content,
             ".epub": self._get_epub_content,
-            ".pdf": self._get_pdf_content,
+            ".pdf": lambda f, s: self._get_pdf_content(f, s, language_name),
             ".srt": self._get_srt_content,
             ".vtt": self._get_vtt_content,
         }
@@ -127,17 +132,74 @@ class FileTextExtraction:
             raise BookImportException(message=msg, cause=e) from e
         return content
 
-    def _get_pdf_content(self, filename, filestream):
-        "Get content as a single string from a PDF file using PyPDF2."
-        content = ""
+    # Below this average of extracted characters per page, a PDF is
+    # assumed to be scanned (no usable text layer) and OCR is attempted.
+    _PDF_MIN_CHARS_PER_PAGE = 50
+
+    def _get_pdf_content(self, filename, filestream, language_name=None):
+        """
+        Get content as a single string from a PDF file.
+
+        Uses the embedded text layer when present.  If the text layer is
+        empty/thin (a scanned PDF) and OCR is enabled and available, falls
+        back to OCR using the book's language.
+        """
         try:
             pdf_reader = PdfReader(filestream)
-            for page in pdf_reader.pages:
-                content += page.extract_text()
-            return content
+            pages = [page.extract_text() for page in pdf_reader.pages]
         except Exception as e:
             msg = f"Could not parse {filename} (error: {str(e)})"
             raise BookImportException(message=msg, cause=e) from e
+
+        content = "".join(pages)
+        avg_chars = len(content.strip()) / max(len(pages), 1)
+        if avg_chars >= self._PDF_MIN_CHARS_PER_PAGE:
+            return content
+
+        # Thin/no text layer => probably scanned.  Try OCR.
+        return self._ocr_pdf_fallback(filename, filestream, language_name, content)
+
+    def _ocr_pdf_fallback(self, filename, filestream, language_name, fallback):
+        """
+        Attempt OCR on a scanned PDF, returning recognized text.
+
+        Returns `fallback` (the thin text-layer content) if OCR is
+        disabled or unavailable, so the caller's empty-content check
+        still fires with a helpful flashed message.
+        """
+        if not self._ocr_enabled():
+            return fallback
+        if not ocr.ocr_available():
+            flash(
+                "This PDF appears to be scanned (no text layer). To import "
+                "scanned PDFs, install the OCR extra "
+                "(pip install 'lute3[ocr]') and Tesseract.",
+                "notice",
+            )
+            return fallback
+
+        tess_lang = ocr.tesseract_language(language_name)
+        if tess_lang is None:
+            flash(
+                f"No OCR language data configured for '{language_name}'; "
+                "using English. Recognition may be poor.",
+                "notice",
+            )
+        flash("Running OCR on a scanned PDF; this may take a while.", "notice")
+        try:
+            return ocr.ocr_pdf_stream(filestream, tess_lang)
+        except Exception as e:
+            msg = f"OCR failed for {filename} (error: {str(e)})"
+            raise BookImportException(message=msg, cause=e) from e
+
+    def _ocr_enabled(self):
+        "Whether OCR fallback is enabled in config (defaults to on)."
+        try:
+            return bool(current_app.env_config.ocr_enabled)
+        except (RuntimeError, AttributeError):
+            # No app context / config: default to enabled; availability
+            # is still gated by ocr.ocr_available().
+            return True
 
     def _get_srt_content(self, filename, filestream):
         """
@@ -233,6 +295,16 @@ class Service:
         b.text = "\n\n".join(extracted_text)
         return b
 
+    def _book_language_name(self, book, session):
+        "Resolve the book's language name (for the PDF OCR fallback)."
+        if book.language_name:
+            return book.language_name
+        if book.language_id:
+            lang = LanguageRepository(session).find(book.language_id)
+            if lang is not None:
+                return lang.name
+        return None
+
     def import_book(self, book, session):
         """
         Save the book as a dbbook, parsing and saving files as needed.
@@ -247,17 +319,19 @@ class Service:
             if p is None:
                 raise BookImportException(f"Must set {fldname}")
 
+        lang_name = self._book_language_name(book, session)
+
         fte = FileTextExtraction()
         if book.text_source_path:
             _raise_if_file_missing(book.text_source_path, "text_source_path")
             tsp = book.text_source_path
             with open(tsp, mode="rb") as stream:
-                book.text = fte.get_file_content(tsp, stream)
+                book.text = fte.get_file_content(tsp, stream, lang_name)
 
         if book.text_stream:
             _raise_if_none(book.text_stream_filename, "text_stream_filename")
             book.text = fte.get_file_content(
-                book.text_stream_filename, book.text_stream
+                book.text_stream_filename, book.text_stream, lang_name
             )
 
         if book.audio_source_path:

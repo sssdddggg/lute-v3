@@ -21,3 +21,9 @@ DBNAME: lute.db
 
 # Set IS_DOCKER: true if this is run in a container.
 # IS_DOCKER: true
+
+# Enable OCR fallback for scanned PDFs that have no text layer.
+# Only has an effect if the 'ocr' extra (pip install 'lute3[ocr]')
+# and a system Tesseract install with the relevant language data
+# are present.  Defaults to true.
+# OCR_ENABLED: true
