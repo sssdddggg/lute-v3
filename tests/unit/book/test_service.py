@@ -51,6 +51,30 @@ def test_create_book_from_file_paths(app, app_context, spanish):
         assert fp.read().strip() == "fake mp3 file", "correct content copied."
 
 
+def test_book_language_name_prefers_explicit_language_name(app_context, spanish):
+    "book.language_name, if set, wins over looking up language_id."
+    b = Book()
+    b.language_name = "Klingon"
+    b.language_id = spanish.id
+    svc = Service()
+    assert svc._book_language_name(b, db.session) == "Klingon"
+
+
+def test_book_language_name_resolves_from_language_id(app_context, spanish):
+    "With no language_name set, the language is looked up by id."
+    b = Book()
+    b.language_id = spanish.id
+    svc = Service()
+    assert svc._book_language_name(b, db.session) == spanish.name
+
+
+def test_book_language_name_none_when_unset(app_context):
+    "With neither language_name nor a resolvable language_id, returns None."
+    b = Book()
+    svc = Service()
+    assert svc._book_language_name(b, db.session) is None
+
+
 def test_create_book_from_streams(app, app_context, spanish):
     "Create a book using streams, as given by the form."
     text_path, mp3_path = get_test_files()
